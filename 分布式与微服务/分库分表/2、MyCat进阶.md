@@ -277,6 +277,485 @@ sharding_id=10010 这个条件，则 MyCat 会将原始 SQL 发送到 persons �
 
 2. 范围条件查询性能提升（并行计算）
 
+离散分片缺点：
 
-离散分片缺点：1）数据扩容比较困难，涉及到数据迁移问题
+- 数据扩容比较困难，涉及到数据迁移问题
+- 数据库连接消耗比较多
 
+#### 4.1.1 连续分片
+
+##### 范围分片
+
+```xml
+<tableRule name="auto-sharding-long">
+    <rule>
+        <columns>id</columns>
+        <algorithm>rang-long</algorithm>
+    </rule>
+</tableRule>
+```
+
+```xml
+<functionname="rang-long"class="io.mycat.route.function.AutoPartitionByLong">
+    <propertyname="mapFile">autopartition-long.txt</property>
+</function>
+```
+
+```
+#rangestart-end,datanodeindex
+#K=1000,M=10000.
+0-500M=0
+500M-1000M=1
+1000M-1500M=2
+```
+
+特点：容易出现冷热数据
+
+##### 按自然月分片
+
+逻辑表
+
+```xml
+<schema name="catmall" checkSQLschema="false" sqlMaxLimit="100">
+    <tablename="sharding_by_month" dataNode="dn1,dn2,dn3" rule="qs-sharding-by-month"/>
+</schema>
+```
+
+分片规则
+
+```xml
+<tableRule name="sharding-by-month">
+    <rule>
+        <columns>create_time</columns>
+        <algorithm>qs-partbymonth</algorithm>
+    </rule>
+</tableRule
+```
+
+分片算法
+
+```xml
+<function name="qs-partbymonth"class="io.mycat.route.function.PartitionByMonth">
+    <propertyname="dateFormat">yyyy-MM-dd</property>
+    <propertyname="sBeginDate">2019-10-01</property>
+    <propertyname="sEndDate">2019-12-31</property>
+</function
+```
+
+columns标识将要分片的表字段，字符串类型，与dateFormat格式一致。
+
+algorithm为分片函数。
+
+dateFormat为日期字符串格式。
+
+sBeginDate为开始日期。
+
+sEndDate为结束日期
+
+注意：节点个数要大于月份的个数
+
+#### 4.1.2 离散分片
+
+##### 枚举分片
+
+将所有可能出现的值列举出来，指定分片。例如：全国34个省，要将不同的省的数据存放在不同的节点，可用枚举的方式。
+
+逻辑表
+
+```xml
+<table name="sharding_by_intfile" dataNode="dn$1-3" rule="qs-sharding-by-intfile"/>
+```
+
+分片规则：
+
+```xml
+<tableRule name="sharding-by-intfile">
+    <rule>
+        <columns>sharding_id</columns>
+        <algorithm>hash-int</algorithm>
+    </rule>
+</tableRule>
+```
+
+分片算法
+
+```xml
+<function name="hash-int"class="org.opencloudb.route.function.PartitionByFileMap">
+    <propertyname="mapFile">partition-hash-int.txt</property>
+    <propertyname="type">0</property>
+    <propertyname="defaultNode">0</property>
+</function
+```
+
+type:默认值为0,0表示Integer 非零表示Srting
+
+PartitionByFileMap.java 通过map来实现
+
+策略文件：partition-hash-int.txt
+
+```
+16=0
+17=1
+18=2
+```
+
+特点：适用于枚举固定的场景
+
+##### 一致性哈希
+
+一致性hash有效解决了分布式数据的扩容问题
+
+逻辑表
+
+```xml
+<schema name="test" checkSQLschema="false" sqlMaxLimit="100">
+    <table name="sharding_by_murmurhash" primaryKey="id" dataNode="dn$1-3" rule="sharding-by-murmur"/>
+</schema>
+```
+
+分片规则
+
+```xml
+<tableRule name="sharding-by-murmur">
+    <rule>
+        <columns>id</columns>
+        <algorithm>qs-murmur</algorithm>
+    </rule>
+</tableRule>
+```
+
+分片算法
+
+```xml
+<function name="qs-murmur"class="io.mycat.route.function.PartitionByMurmurHash">
+    <property name="seed">0</property>
+    <property name="count">3</property>
+    <property name="virtualBucketTimes">160</property>
+</function>
+```
+
+特点：可以一定程度减少数据的迁移
+
+##### 十进制取模分片
+
+根据分片键进行十进制求模运算
+
+```xml
+<tableRule name="mod-long">
+    <rule>
+        <columns>sid</columns>
+        <algorithm>mod-long</algorithm>
+    </rule>
+</tableRule>
+```
+
+```xml
+<function name="mod-long" class="io.mycat.route.function.PartitionByMod">
+    <!--how many datanodes-->
+    <propertyname="count">3</property>
+</function>
+```
+
+特点：分布均匀，但是迁移工作量比较大
+
+##### 固定分片哈希
+
+这是先求模得到逻辑分片号，再根据逻辑分片号直接映射到物理分片的一种散列算法。
+
+逻辑表
+
+```xml
+<schema name="test" checkSQLschema="false" sqlMaxLimit="100">
+    <table name="sharding_by_long" dataNode="dn$1-3" rule="qs-sharding-by-long"/>
+</schema>
+```
+
+分片规则
+
+```xml
+<tableRule name="qs-sharding-by-long">
+    <rule>
+        <columns>id</columns>
+        <algorithm>qs-sharding-by-long</algorithm>
+    </rule>
+</tableRule>
+```
+
+平均分成8片（%1024的余数，1024=128*8）
+
+```xml
+<function name="qs-sharding-by-long" class="io.mycat.route.function.PartitionByLong">
+    <property name="partitionCount">8</property>
+    <property name="partitionLength">128</property>
+</function>
+```
+
+partitionCount为指定分片个数列表
+
+partitionLength为分片范围列表
+
+第二个例子：
+
+两个数组，分成不均匀的3个节点（%1024的余数，`1024=2*256+1*512`）
+
+```xml
+<function name="qs-sharding-by-long" class="io.mycat.route.function.PartitionByLong">
+    <property name="partitionCount">2,1</property>
+    <property name="partitionLength">256,512</property>
+</function>
+```
+
+3个节点，对1024取模余数的分布
+
+0-255   255-511   512-1023
+
+特点：在一定范围内id是连续分布的
+
+##### 取模范围分片
+
+逻辑表
+
+```xml
+<schema name="test" checkSQLschema="false" sqlMaxLimit="100">
+    <table name="sharding_by_pattern" primaryKey="id" dataNode="dn$0-10" rule="qs-sharding-by-pattern"/>
+</schema>
+```
+
+分片规则
+
+```xml
+<tableRule name="sharding-by-pattern">
+    <rule>
+        <columns>user_id</columns>
+        <algorithm>sharding-by-pattern</algorithm>
+    </rule>
+</tableRule>
+```
+
+分片算法
+
+```xml
+<function name="sharding-by-pattern"class="io.mycat.route.function.PartitionByPattern">
+    <property name="patternValue">100</property>
+    <property name="defaultNode">0</property>
+    <property name="mapFile">partition-pattern.txt</property>
+</function>
+```
+
+patternValue取模基数，这里设置成100
+
+partition-pattern.txt，一共3个节点
+
+id=19%100=19，在dn1；
+
+id=222%100=22，dn2；
+
+id=371%100=71，dn3
+
+```
+#id partition range start-end,data node index
+######first host configuration
+1-20=0
+21-70=1
+71-100=2
+0-0=0
+```
+
+特点：可以调整节点的数据分布
+
+##### 范围取模分片
+
+逻辑表
+
+```xml
+<schema name="test" checkSQLschema="false" sqlMaxLimit="100">
+    <table name="sharding_by_rang_mod" dataNode="dn$1-3" rule="qs-sharding-by-rang-mod"/>
+</schema>
+```
+
+分片规则
+
+```xml
+<tableRule name="qs-sharding-by-rang-mod">
+    <rule>
+        <columns>id</columns>
+        <algorithm>qs-rang-mod</algorithm>
+    </rule>
+</tableRule>
+```
+
+分片算法
+
+```xml
+<function name="qs-rang-mod" class="io.mycat.route.function.PartitionByRangeMod">
+    <property name="mapFile">partition-range-mod.txt</property>
+</function>
+```
+
+partition-range-mod.txt
+
+```
+0-20000=1
+20001-40000=2
+```
+
+解读：先范围后取模。Id在20000以内的，全部分布到dn1。Id在20001-40000的，%2分布到dn2,dn3.
+
+特点：扩容的时候旧数据无需迁移
+
+##### 其他分片规则
+
+应用指定分片PartitionDirectBySubString
+
+日期范围哈希PartitionByRangeDateHash
+
+冷热数据分片PartitionByHotDate
+
+也可以自定义分片规则：extends AbstractPartitionAlgorithm implements RuleAlgorithm。
+
+#### 4.1.3 切分规则的选择
+
+步骤：
+
+1. 找到需要切分的大表和关联的表
+2. 确定分片字段（尽量使用主键），一般用最频繁使用的查询条件
+3. 考虑单个分片的存储容量和请求、数据增长（业务特性）、扩容和数据迁移问题。
+
+一般来说，分片数要比当前规划的节点数要大。
+
+总结：根据业务场景，合理地选择分片规则。
+
+## 5.Mycat离线扩缩容
+
+当我们规划了数据分片，而数据已经超过了单个节点的存储上线，或者需要下线节点的时候，就需要对数据重新分片。
+
+### 5.1 Mycat自带的工具
+
+#### 5.1.1 准备工作
+
+- mycat所在环境安装mysql客户端程序。
+- mycat的lib目录下添加mysql的jdbc驱动包。
+- 对扩容缩容的表所有节点数据进行备份，以便迁移失败后的数据恢复。
+
+#### 5.1.2 步骤
+
+以取模分片表sharding-by-mod缩容为例
+
+![Mycat高可用](images\Mycat缩容.png)
+
+1. 复制schema.xml、rule.xml并重命名为newSchema.xml、newRule.xml放于conf目录下。
+
+2. 修改newSchema.xml和newRule.xml配置文件为扩容缩容后的mycat配置参数（表的节点数、数据源、路由规则）。
+
+注意：只有节点变化的表才会进行迁移。仅分片配置变化不会迁移。
+
+newSchema.xml
+
+```xml
+<table name="sharding_by_mod" dataNode="dn1,dn2,dn3" rule="qs-sharding-by-mod"/>
+```
+
+改成：
+
+```xml
+<table name="sharding_by_mod" dataNode="dn1,dn2" rule="qs-sharding-by-mod"/>
+```
+
+newRule.xml修改count个数
+
+```xml
+<function name="qs-sharding-by-mod-long"class="io.mycat.route.function.PartitionByMod">
+    <property name="count">2</property>
+</function>
+```
+
+3. 修改conf目录下的migrateTables.properties配置文件，告诉工具哪些表需要进行扩容或缩容,没有出现在此配置文件的schema表不会进行数据迁移，格式：
+
+   注意：不迁移的表，不要修改dn个数，否则会报错；ER表，因为只有主表有分配规则，字表不会迁移
+
+4. dataMigrate.sh中这个必须要配置
+
+   通过命令"find / -name mysqldump"查找mysqldump路径为"/usr/bin/mysqldump"，指定#mysqlbin路径为"/usr/bin/"
+
+   ```shell
+   #mysql bin路径
+   RUN_CMD="$RUN_CMD -mysqlBin=/usr/bin/"
+   ```
+
+   
+
+5. 停止mycat服务
+
+6. 执行bin/dataMigrate.sh脚本
+
+7. 脚本执行完成，如果最后的数据迁移验证通过，就可以将之前的newSchema.xml和newRule.xml替换之前的schema.xml和rule.xml文件，并重启mycat即可
+
+注意事项：
+
+1. 保证分片表迁移数据前后路由规则一致（取模——取模）。
+
+2. 保证分片表迁移数据前后分片字段一致。
+
+3. 全局表将被忽略。
+
+4. 不要将非分片表配置到migrateTables.properties文件中。
+
+5. 暂时只支持分片表使用MySQL作为数据源的扩容缩容。
+
+migrate限制比较多，还可以使用mysqldump
+
+### 5.2 mysqldump方式
+
+系统 上线，把单张表迁移到Mycat，也可以用mysqldump
+
+MySQL导出：
+
+```sql
+mysqldump -uroot -p123456 -h127.0.0.1 -P3306 -c -t --skip-extended-insert testcat >mysql-1017.sql
+```
+
+-c :带列名
+
+-t:只要数据，不需要建表
+
+--skip-extended-insert 代表生成多行insert
+
+Mycat导入
+
+```sql
+mysql -uroot -p123456 -h127.0.0.1 -P8066 testcat <mysql-1017.sql
+```
+
+Mycat导出
+
+```
+mysqldump -h 192.168.2.186 -uroot -p123456 -P8066 -c -t --skip-extended-insert testcat customer >mysql-cust.sql
+```
+
+其他导入方式：
+
+```
+load data local infile '/mycat/customer.txt' into table customer;
+source sql '/mycat/customer.sql'
+```
+
+## 6.核心流程总结
+
+![Mycat架构图](images\Mycat架构图.png)
+
+### 6.1 启动
+
+1. MycatServer启动，解析配置文件，包括服务器、分配规则等
+2. 创建工作线程，建立前端链接和后端连接
+
+### 6.2 执行SQL
+
+1. 前端连接接收MySQL命令
+2. 解析MySQL,Mycat用的是Druid的DruidParser
+3. 获取路由
+4. 改写SQL，例如两个条件在两个节点上，则变成两天单独的SQL
+5. 与后端数据库建立连接
+6. 发送SQL到MySQL执行
+7. 获取返回结果
+8. 处理返回结果，例如排序、计算等等
+9. 返回给客户端
